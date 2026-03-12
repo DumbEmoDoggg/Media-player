@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSplitter,
+    QStackedWidget,
     QStyle,
     QTabWidget,
     QVBoxLayout,
@@ -351,6 +352,90 @@ QListWidget#library::item:hover:!selected {
     background-color: #1e1e2e;
     color: #ffffff;
 }
+
+/* ── Home page ────────────────────────────────────────────────────────────── */
+QWidget#homePage {
+    background-color: #0f0f13;
+}
+
+QLabel#homeTitle {
+    color: #2d7ae0;
+    font-size: 36px;
+    font-weight: 700;
+    letter-spacing: 6px;
+}
+
+QLabel#homeSubtitle {
+    color: #9898a0;
+    font-size: 14px;
+    letter-spacing: 1px;
+}
+
+QPushButton#homeNavBtn {
+    background-color: #13131b;
+    color: #dddddd;
+    border: 1px solid #1c1c28;
+    border-radius: 12px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    min-width: 160px;
+    min-height: 130px;
+    padding: 16px 24px;
+}
+
+QPushButton#homeNavBtn:hover {
+    background-color: #1a1a2e;
+    border-color: #2d7ae0;
+    color: #ffffff;
+}
+
+QPushButton#homeNavBtn:pressed {
+    background-color: #2d7ae0;
+    color: #ffffff;
+    border-color: #2d7ae0;
+}
+
+/* ── Home button in header ────────────────────────────────────────────────── */
+QPushButton#homeBtn {
+    background-color: transparent;
+    color: #9898a0;
+    border: 1px solid #1c1c28;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    min-height: 28px;
+    padding: 0 12px;
+    margin-left: 8px;
+}
+
+QPushButton#homeBtn:hover {
+    color: #ffffff;
+    background-color: #1e1e2e;
+    border-color: #2d7ae0;
+}
+
+QPushButton#homeBtn:pressed {
+    color: #2d7ae0;
+}
+
+/* ── Settings page ────────────────────────────────────────────────────────── */
+QWidget#settingsPage {
+    background-color: #0f0f13;
+}
+
+QLabel#settingsTitle {
+    color: #2d7ae0;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 4px;
+}
+
+QLabel#settingsSubtitle {
+    color: #9898a0;
+    font-size: 13px;
+}
 """
 
 
@@ -451,6 +536,60 @@ class MediaPlayer(QMainWindow):
 
         layout.addWidget(self._make_header())
 
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._make_home_page())     # index 0 – home
+        self._stack.addWidget(self._make_player_page())   # index 1 – player
+        self._stack.addWidget(self._make_settings_page()) # index 2 – settings
+        layout.addWidget(self._stack, 1)
+
+    def _make_home_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("homePage")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addStretch(1)
+
+        # Title
+        title_lbl = QLabel("LUMINA")
+        title_lbl.setObjectName("homeTitle")
+        title_lbl.setAlignment(Qt.AlignCenter)
+        outer.addWidget(title_lbl)
+
+        subtitle_lbl = QLabel("Your personal media player")
+        subtitle_lbl.setObjectName("homeSubtitle")
+        subtitle_lbl.setAlignment(Qt.AlignCenter)
+        outer.addWidget(subtitle_lbl)
+
+        outer.addSpacing(48)
+
+        # Navigation cards row
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(24)
+        cards_row.setContentsMargins(80, 0, 80, 0)
+
+        cards = [
+            ("▶\n\nVideo Player", "Open the video player", self._go_to_player),
+            ("🗂\n\nLibrary",     "Browse your media library", self._go_to_library),
+            ("⚙\n\nSettings",    "Configure application settings", self._go_to_settings),
+        ]
+
+        for label_text, tooltip, slot in cards:
+            btn = QPushButton(label_text)
+            btn.setObjectName("homeNavBtn")
+            btn.setToolTip(tooltip)
+            btn.clicked.connect(slot)
+            cards_row.addWidget(btn)
+
+        outer.addLayout(cards_row)
+        outer.addStretch(2)
+        return page
+
+    def _make_player_page(self) -> QWidget:
+        container = QWidget()
+        v = QVBoxLayout(container)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(1)
         splitter.addWidget(self._make_sidebar())
@@ -458,15 +597,64 @@ class MediaPlayer(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([240, 1040])
-        layout.addWidget(splitter, 1)
+        v.addWidget(splitter, 1)
 
-        layout.addWidget(self._make_control_bar())
+        v.addWidget(self._make_control_bar())
+        return container
+
+    def _make_settings_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("settingsPage")
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.addStretch(1)
+
+        title_lbl = QLabel("SETTINGS")
+        title_lbl.setObjectName("settingsTitle")
+        title_lbl.setAlignment(Qt.AlignCenter)
+        v.addWidget(title_lbl)
+
+        v.addSpacing(16)
+
+        subtitle_lbl = QLabel("Settings will be available in a future release.")
+        subtitle_lbl.setObjectName("settingsSubtitle")
+        subtitle_lbl.setAlignment(Qt.AlignCenter)
+        v.addWidget(subtitle_lbl)
+
+        v.addStretch(2)
+        return page
+
+    # ── Navigation ─────────────────────────────────────────────────────────
+
+    def _go_home(self) -> None:
+        self._stack.setCurrentIndex(0)
+        self._home_btn.hide()
+
+    def _go_to_player(self) -> None:
+        self._stack.setCurrentIndex(1)
+        self._home_btn.show()
+
+    def _go_to_library(self) -> None:
+        self._stack.setCurrentIndex(1)
+        self._sidebar_tabs.setCurrentIndex(1)
+        self._home_btn.show()
+
+    def _go_to_settings(self) -> None:
+        self._stack.setCurrentIndex(2)
+        self._home_btn.show()
 
     def _make_header(self) -> QFrame:
         bar = QFrame()
         bar.setObjectName("headerBar")
         h = QHBoxLayout(bar)
         h.setContentsMargins(0, 0, 0, 0)
+
+        self._home_btn = QPushButton("HOME")
+        self._home_btn.setObjectName("homeBtn")
+        self._home_btn.setToolTip("Home  (Alt+Home)")
+        self._home_btn.clicked.connect(self._go_home)
+        self._home_btn.hide()
+        h.addWidget(self._home_btn)
 
         logo = QLabel("LUMINA")
         logo.setObjectName("appTitle")
@@ -489,11 +677,11 @@ class MediaPlayer(QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
-        tabs = QTabWidget()
-        tabs.setObjectName("sidebarTabs")
-        tabs.addTab(self._make_playlist_tab(), "PLAYLIST")
-        tabs.addTab(self._make_library_tab(), "LIBRARY")
-        v.addWidget(tabs, 1)
+        self._sidebar_tabs = QTabWidget()
+        self._sidebar_tabs.setObjectName("sidebarTabs")
+        self._sidebar_tabs.addTab(self._make_playlist_tab(), "PLAYLIST")
+        self._sidebar_tabs.addTab(self._make_library_tab(), "LIBRARY")
+        v.addWidget(self._sidebar_tabs, 1)
 
         return sidebar
 
@@ -680,6 +868,7 @@ class MediaPlayer(QMainWindow):
             (Qt.Key_Down,                   self._volume_down),
             (Qt.Key_M,                      self._toggle_mute),
             (Qt.Key_O,                      self._open_files),
+            (Qt.ALT + Qt.Key_Home,          self._go_home),
         ]
         for key, slot in bindings:
             sc = QShortcut(QKeySequence(key), self)
