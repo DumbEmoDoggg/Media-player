@@ -1064,6 +1064,8 @@ class MediaPlayer(QMainWindow):
 
         # Active yt-dlp stream worker (kept alive until thread finishes)
         self._yt_stream_worker: _YTStreamWorker | None = None
+        # Original full-resolution pixmap for the currently displayed image
+        self._current_pixmap: QPixmap | None = None
 
         # Auto-hide cursor in fullscreen
         self._cursor_timer = QTimer(self)
@@ -2226,7 +2228,11 @@ class MediaPlayer(QMainWindow):
         pixmap = QPixmap(path)
         if pixmap.isNull():
             self._picture_label.setText(f"Cannot load image:\n{path}")
+            self._current_pixmap = None
             return
+
+        # Store the original full-resolution pixmap so resizing always scales from it
+        self._current_pixmap = pixmap
 
         # Scale to fit the available viewport while keeping aspect ratio
         view_size = self._picture_scroll.viewport().size()
@@ -2239,15 +2245,17 @@ class MediaPlayer(QMainWindow):
     def resizeEvent(self, event) -> None:
         """Re-scale the current picture when the window is resized."""
         super().resizeEvent(event)
-        if self._media_stack.currentIndex() == 1:
-            label_pixmap = self._picture_label.pixmap()
-            if label_pixmap and not label_pixmap.isNull():
-                view_size = self._picture_scroll.viewport().size()
-                scaled = label_pixmap.scaled(
-                    view_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
-                self._picture_label.setPixmap(scaled)
-                self._picture_label.resize(scaled.size())
+        if (
+            self._media_stack.currentIndex() == 1
+            and getattr(self, "_current_pixmap", None) is not None
+            and not self._current_pixmap.isNull()
+        ):
+            view_size = self._picture_scroll.viewport().size()
+            scaled = self._current_pixmap.scaled(
+                view_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            self._picture_label.setPixmap(scaled)
+            self._picture_label.resize(scaled.size())
 
     # ── YouTube support ────────────────────────────────────────────────────
 
@@ -2301,9 +2309,10 @@ class MediaPlayer(QMainWindow):
         self._now_playing_lbl.setText(f"⏳ Loading: {display}")
         self.setWindowTitle(f"Loading… — Lumina Media Player")
 
-        # Cancel any previous worker
+        # Cancel any previous worker — quit the thread gracefully and wait for it
         if self._yt_stream_worker is not None:
-            self._yt_stream_worker.results_ready if hasattr(self._yt_stream_worker, "results_ready") else None
+            self._yt_stream_worker.quit()
+            self._yt_stream_worker.wait()
             self._yt_stream_worker = None
 
         self._yt_stream_worker = _YTStreamWorker(url)
