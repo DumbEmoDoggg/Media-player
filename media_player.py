@@ -7,6 +7,7 @@ Built with PyQt5 and Qt Multimedia.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -22,12 +23,14 @@ from PyQt5.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QShortcut,
     QSizePolicy,
     QSlider,
     QSplitter,
     QStyle,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
     QMainWindow,
@@ -48,6 +51,11 @@ VIDEO_FILTER = (
     "Video Files (*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.webm "
     "*.m4v *.mpg *.mpeg *.3gp *.ts *.m2ts *.vob *.ogv *.mxf "
     "*.asf *.rm *.rmvb);;All Files (*)"
+)
+
+# Path to persist the media library between sessions
+LIBRARY_FILE = os.path.join(
+    os.path.expanduser("~"), ".lumina_media_library.json"
 )
 
 # ---------------------------------------------------------------------------
@@ -290,6 +298,59 @@ QLabel#volumeIcon {
     font-size: 14px;
     padding: 0 4px;
 }
+
+/* ── Sidebar tabs ─────────────────────────────────────────────────────────── */
+QTabWidget#sidebarTabs::pane {
+    border: none;
+    background-color: #13131b;
+}
+
+QTabWidget#sidebarTabs > QTabBar::tab {
+    background-color: #0f0f18;
+    color: #9898a0;
+    padding: 7px 12px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    border: none;
+    border-bottom: 2px solid transparent;
+}
+
+QTabWidget#sidebarTabs > QTabBar::tab:selected {
+    color: #2d7ae0;
+    border-bottom: 2px solid #2d7ae0;
+    background-color: #13131b;
+}
+
+QTabWidget#sidebarTabs > QTabBar::tab:hover:!selected {
+    color: #dddddd;
+    background-color: #1a1a28;
+}
+
+/* ── Library list ────────────────────────────────────────────────────────── */
+QListWidget#library {
+    background-color: transparent;
+    border: none;
+    outline: 0;
+    color: #c0c0d0;
+    font-size: 13px;
+}
+
+QListWidget#library::item {
+    padding: 9px 12px;
+    border-radius: 3px;
+    margin: 2px 4px;
+}
+
+QListWidget#library::item:selected {
+    background-color: #2d7ae0;
+    color: #ffffff;
+}
+
+QListWidget#library::item:hover:!selected {
+    background-color: #1e1e2e;
+    color: #ffffff;
+}
 """
 
 
@@ -351,6 +412,10 @@ class MediaPlayer(QMainWindow):
         self._seek_dragging: bool = False
         self._is_fullscreen: bool = False
 
+        # Media library: list of scanned folder paths and discovered video files
+        self._library_folders: list[str] = []
+        self._library_paths: list[str] = []
+
         # Auto-hide cursor in fullscreen
         self._cursor_timer = QTimer(self)
         self._cursor_timer.setSingleShot(True)
@@ -371,6 +436,9 @@ class MediaPlayer(QMainWindow):
         # Wire video output after widget exists
         self.player.setVideoOutput(self._video_widget)
         self.player.setVolume(80)
+
+        # Load persisted library
+        self._load_library()
 
     # ── UI construction ────────────────────────────────────────────────────
 
@@ -421,9 +489,19 @@ class MediaPlayer(QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
-        heading = QLabel("PLAYLIST")
-        heading.setObjectName("sidebarTitle")
-        v.addWidget(heading)
+        tabs = QTabWidget()
+        tabs.setObjectName("sidebarTabs")
+        tabs.addTab(self._make_playlist_tab(), "PLAYLIST")
+        tabs.addTab(self._make_library_tab(), "LIBRARY")
+        v.addWidget(tabs, 1)
+
+        return sidebar
+
+    def _make_playlist_tab(self) -> QWidget:
+        widget = QWidget()
+        v = QVBoxLayout(widget)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
 
         self._playlist_widget = QListWidget()
         self._playlist_widget.setObjectName("playlist")
@@ -450,7 +528,46 @@ class MediaPlayer(QMainWindow):
         btn_row.addWidget(clear_btn)
         v.addLayout(btn_row)
 
-        return sidebar
+        return widget
+
+    def _make_library_tab(self) -> QWidget:
+        widget = QWidget()
+        v = QVBoxLayout(widget)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        self._library_widget = QListWidget()
+        self._library_widget.setObjectName("library")
+        self._library_widget.itemDoubleClicked.connect(
+            self._on_library_double_click
+        )
+        v.addWidget(self._library_widget, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(8, 8, 8, 8)
+        btn_row.setSpacing(6)
+
+        scan_btn = QPushButton("📁  SCAN")
+        scan_btn.setObjectName("sidebarBtn")
+        scan_btn.setToolTip("Scan a folder for video files")
+        scan_btn.clicked.connect(self._scan_folder)
+
+        add_all_btn = QPushButton("▶  ADD ALL")
+        add_all_btn.setObjectName("sidebarBtn")
+        add_all_btn.setToolTip("Add all library items to playlist")
+        add_all_btn.clicked.connect(self._library_add_all)
+
+        clear_lib_btn = QPushButton("✕")
+        clear_lib_btn.setObjectName("sidebarBtn")
+        clear_lib_btn.setToolTip("Clear library")
+        clear_lib_btn.clicked.connect(self._clear_library)
+
+        btn_row.addWidget(scan_btn)
+        btn_row.addWidget(add_all_btn)
+        btn_row.addWidget(clear_lib_btn)
+        v.addLayout(btn_row)
+
+        return widget
 
     def _make_video_area(self) -> QWidget:
         container = QWidget()
@@ -647,6 +764,106 @@ class MediaPlayer(QMainWindow):
 
     def _on_playlist_double_click(self, item: QListWidgetItem) -> None:
         self._play_index(self._playlist_widget.row(item))
+
+    # ── Media library operations ───────────────────────────────────────────
+
+    def _scan_folder(self) -> None:
+        """Open a directory dialog and recursively scan for video files."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Folder to Scan", os.path.expanduser("~")
+        )
+        if not folder:
+            return
+
+        found: list[str] = []
+        for dirpath, _dirnames, filenames in os.walk(folder):
+            for fname in sorted(filenames):
+                if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTENSIONS:
+                    found.append(os.path.join(dirpath, fname))
+
+        if not found:
+            QMessageBox.information(
+                self,
+                "No Videos Found",
+                f"No supported video files were found in:\n{folder}",
+            )
+            return
+
+        # Add folder to tracked folders and merge new paths (avoid duplicates)
+        if folder not in self._library_folders:
+            self._library_folders.append(folder)
+
+        existing = set(self._library_paths)
+        new_paths = [p for p in found if p not in existing]
+        if new_paths:
+            self._library_paths.extend(new_paths)
+            self._library_paths.sort(key=lambda p: os.path.basename(p).lower())
+            self._refresh_library_widget()
+            self._save_library()
+
+    def _refresh_library_widget(self) -> None:
+        self._library_widget.clear()
+        for path in self._library_paths:
+            item = QListWidgetItem(os.path.basename(path))
+            item.setToolTip(path)
+            self._library_widget.addItem(item)
+
+    def _on_library_double_click(self, item: QListWidgetItem) -> None:
+        """Add the double-clicked library item to the playlist and play it."""
+        path = item.toolTip()
+        if path not in self._playlist_paths:
+            self._add_to_playlist(path)
+        index = self._playlist_paths.index(path)
+        self._play_index(index)
+
+    def _library_add_all(self) -> None:
+        """Append all library items to the current playlist."""
+        if not self._library_paths:
+            return
+        start = len(self._playlist_paths)
+        for path in self._library_paths:
+            if path not in self._playlist_paths:
+                self._add_to_playlist(path)
+        if self._current_index < 0 and self._playlist_paths:
+            self._play_index(start)
+
+    def _clear_library(self) -> None:
+        self._library_folders.clear()
+        self._library_paths.clear()
+        self._library_widget.clear()
+        self._save_library()
+
+    def _save_library(self) -> None:
+        """Persist the library to a JSON file."""
+        data = {
+            "folders": self._library_folders,
+            "files": self._library_paths,
+        }
+        try:
+            with open(LIBRARY_FILE, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+        except OSError:
+            pass
+
+    def _load_library(self) -> None:
+        """Load the persisted library from disk (if it exists)."""
+        if not os.path.isfile(LIBRARY_FILE):
+            return
+        try:
+            with open(LIBRARY_FILE, encoding="utf-8") as fh:
+                data = json.load(fh)
+            self._library_folders = [
+                f for f in data.get("folders", []) if isinstance(f, str)
+            ]
+            # Only keep files that still exist on disk
+            self._library_paths = [
+                p
+                for p in data.get("files", [])
+                if isinstance(p, str) and os.path.isfile(p)
+            ]
+            self._refresh_library_widget()
+        except (OSError, json.JSONDecodeError):
+            pass
 
     # ── Fullscreen ─────────────────────────────────────────────────────────
 
