@@ -13,18 +13,22 @@ import sys
 
 from PyQt5.QtCore import Qt, QUrl, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QKeySequence
-from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
+from PyQt5.QtMultimedia import QAudio, QAudioDeviceInfo, QMediaContent, QMediaPlayer
 from PyQt5.QtMultimediaWidgets import QVideoWidget
 from PyQt5.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QShortcut,
     QSizePolicy,
     QSlider,
@@ -58,6 +62,30 @@ VIDEO_FILTER = (
 LIBRARY_FILE = os.path.join(
     os.path.expanduser("~"), ".lumina_media_library.json"
 )
+
+# Path to persist user settings between sessions
+_SETTINGS_FILE = os.path.join(
+    os.path.expanduser("~"), ".lumina_settings.json"
+)
+
+# Default settings values
+_DEFAULT_SETTINGS: dict = {
+    "volume": 80,
+    "audio_device": "",
+    "display_index": 0,
+    "window_mode": "windowed",
+    "resolution": [1280, 720],
+}
+
+# Selectable window resolutions
+_RESOLUTIONS = [
+    ("640 × 360",   640,  360),
+    ("854 × 480",   854,  480),
+    ("1280 × 720",  1280, 720),
+    ("1600 × 900",  1600, 900),
+    ("1920 × 1080", 1920, 1080),
+    ("2560 × 1440", 2560, 1440),
+]
 
 # ---------------------------------------------------------------------------
 # Kodi Estuary-inspired stylesheet
@@ -432,9 +460,120 @@ QLabel#settingsTitle {
     letter-spacing: 4px;
 }
 
-QLabel#settingsSubtitle {
-    color: #9898a0;
+QScrollArea#settingsScroll {
+    background-color: transparent;
+    border: none;
+}
+
+QWidget#settingsContent {
+    background-color: transparent;
+}
+
+QGroupBox#settingsGroup {
+    color: #2d7ae0;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    border: 1px solid #1c1c28;
+    border-radius: 8px;
+    margin-top: 14px;
+    padding-top: 8px;
+}
+
+QGroupBox#settingsGroup::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 8px;
+    left: 14px;
+}
+
+QLabel#settingLabel {
+    color: #dddddd;
     font-size: 13px;
+    min-width: 170px;
+}
+
+QLabel#settingsValueLabel {
+    color: #9898a0;
+    font-size: 12px;
+    min-width: 36px;
+}
+
+QComboBox#settingsCombo {
+    background-color: #1a1a28;
+    color: #dddddd;
+    border: 1px solid #1c1c28;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-size: 13px;
+    min-width: 220px;
+    min-height: 32px;
+}
+
+QComboBox#settingsCombo:hover {
+    border-color: #2d7ae0;
+}
+
+QComboBox#settingsCombo:disabled {
+    color: #505060;
+    background-color: #141420;
+    border-color: #141420;
+}
+
+QComboBox#settingsCombo::drop-down {
+    border: none;
+    width: 20px;
+}
+
+QComboBox#settingsCombo QAbstractItemView {
+    background-color: #1a1a28;
+    color: #dddddd;
+    border: 1px solid #2d7ae0;
+    selection-background-color: #2d7ae0;
+    outline: none;
+}
+
+QSlider#settingsSlider::groove:horizontal {
+    height: 4px;
+    background: #2a2a3a;
+    border-radius: 2px;
+}
+
+QSlider#settingsSlider::sub-page:horizontal {
+    background: #2d7ae0;
+    border-radius: 2px;
+}
+
+QSlider#settingsSlider::handle:horizontal {
+    background: #5097f2;
+    width: 14px;
+    height: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+}
+
+QSlider#settingsSlider::handle:horizontal:hover {
+    background: #7ab3ff;
+}
+
+QPushButton#settingsApplyBtn {
+    background-color: #2d7ae0;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    padding: 10px 40px;
+    min-width: 160px;
+}
+
+QPushButton#settingsApplyBtn:hover {
+    background-color: #3d8af0;
+}
+
+QPushButton#settingsApplyBtn:pressed {
+    background-color: #1d6ad0;
 }
 """
 
@@ -451,6 +590,15 @@ def _format_time(ms: int) -> str:
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
+
+
+# ---------------------------------------------------------------------------
+# Helper: create a styled label for a settings form row
+# ---------------------------------------------------------------------------
+def _settings_lbl(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setObjectName("settingLabel")
+    return lbl
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +654,10 @@ class MediaPlayer(QMainWindow):
         self._cursor_timer.setSingleShot(True)
         self._cursor_timer.timeout.connect(self._hide_cursor)
 
+        # Load persisted settings before building the UI so the settings page
+        # can initialise its widgets with the saved values.
+        self._settings: dict = self._load_settings()
+
         # Media engine
         self.player = QMediaPlayer(self, QMediaPlayer.VideoSurface)
         self.player.stateChanged.connect(self._on_state_changed)
@@ -518,9 +670,9 @@ class MediaPlayer(QMainWindow):
         self._setup_shortcuts()
         self.setStyleSheet(ESTUARY_STYLESHEET)
 
-        # Wire video output after widget exists
+        # Wire video output after widget exists, then apply saved settings
         self.player.setVideoOutput(self._video_widget)
-        self.player.setVolume(80)
+        self._apply_initial_settings()
 
         # Load persisted library
         self._load_library()
@@ -605,23 +757,136 @@ class MediaPlayer(QMainWindow):
     def _make_settings_page(self) -> QWidget:
         page = QWidget()
         page.setObjectName("settingsPage")
-        v = QVBoxLayout(page)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.addStretch(1)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
         title_lbl = QLabel("SETTINGS")
         title_lbl.setObjectName("settingsTitle")
         title_lbl.setAlignment(Qt.AlignCenter)
-        v.addWidget(title_lbl)
+        title_lbl.setContentsMargins(0, 28, 0, 20)
+        outer.addWidget(title_lbl)
 
-        v.addSpacing(16)
+        # Scrollable content area
+        scroll = QScrollArea()
+        scroll.setObjectName("settingsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
 
-        subtitle_lbl = QLabel("Settings will be available in a future release.")
-        subtitle_lbl.setObjectName("settingsSubtitle")
-        subtitle_lbl.setAlignment(Qt.AlignCenter)
-        v.addWidget(subtitle_lbl)
+        content = QWidget()
+        content.setObjectName("settingsContent")
+        vlay = QVBoxLayout(content)
+        vlay.setContentsMargins(80, 8, 80, 32)
+        vlay.setSpacing(20)
 
-        v.addStretch(2)
+        # ── Audio ─────────────────────────────────────────────────────────
+        audio_grp = QGroupBox("AUDIO")
+        audio_grp.setObjectName("settingsGroup")
+        audio_form = QFormLayout(audio_grp)
+        audio_form.setSpacing(14)
+        audio_form.setContentsMargins(16, 20, 16, 16)
+        audio_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        # Audio output device
+        self._audio_device_combo = QComboBox()
+        self._audio_device_combo.setObjectName("settingsCombo")
+        try:
+            devices = QAudioDeviceInfo.availableDevices(QAudio.AudioOutput)
+        except Exception:
+            devices = []
+        for dev in devices:
+            self._audio_device_combo.addItem(dev.deviceName(), dev.deviceName())
+        if self._audio_device_combo.count() == 0:
+            self._audio_device_combo.addItem("System Default", "")
+        saved_audio = self._settings.get("audio_device", "")
+        if saved_audio:
+            idx = self._audio_device_combo.findData(saved_audio)
+            if idx >= 0:
+                self._audio_device_combo.setCurrentIndex(idx)
+        audio_form.addRow(_settings_lbl("Audio Output Device"), self._audio_device_combo)
+
+        # Default volume
+        vol_container = QWidget()
+        vol_layout = QHBoxLayout(vol_container)
+        vol_layout.setContentsMargins(0, 0, 0, 0)
+        vol_layout.setSpacing(10)
+
+        self._settings_vol_slider = _ClickableSlider(Qt.Horizontal)
+        self._settings_vol_slider.setObjectName("settingsSlider")
+        self._settings_vol_slider.setRange(0, 100)
+        self._settings_vol_slider.setValue(self._settings.get("volume", 80))
+        self._settings_vol_slider.setFixedWidth(180)
+        vol_layout.addWidget(self._settings_vol_slider)
+
+        self._settings_vol_label = QLabel(f"{self._settings.get('volume', 80)}%")
+        self._settings_vol_label.setObjectName("settingsValueLabel")
+        self._settings_vol_label.setMinimumWidth(36)
+        self._settings_vol_slider.valueChanged.connect(
+            lambda v: self._settings_vol_label.setText(f"{v}%")
+        )
+        vol_layout.addWidget(self._settings_vol_label)
+        vol_layout.addStretch()
+        audio_form.addRow(_settings_lbl("Default Volume"), vol_container)
+
+        vlay.addWidget(audio_grp)
+
+        # ── Display ───────────────────────────────────────────────────────
+        disp_grp = QGroupBox("DISPLAY")
+        disp_grp.setObjectName("settingsGroup")
+        disp_form = QFormLayout(disp_grp)
+        disp_form.setSpacing(14)
+        disp_form.setContentsMargins(16, 20, 16, 16)
+        disp_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        # Monitor selection
+        self._display_combo = QComboBox()
+        self._display_combo.setObjectName("settingsCombo")
+        for i, scr in enumerate(QApplication.screens()):
+            geo = scr.geometry()
+            self._display_combo.addItem(
+                f"Display {i + 1}  –  {scr.name()}  ({geo.width()} × {geo.height()})",
+                i,
+            )
+        saved_display = self._settings.get("display_index", 0)
+        if isinstance(saved_display, int) and 0 <= saved_display < self._display_combo.count():
+            self._display_combo.setCurrentIndex(saved_display)
+        disp_form.addRow(_settings_lbl("Monitor"), self._display_combo)
+
+        # Window mode
+        self._window_mode_combo = QComboBox()
+        self._window_mode_combo.setObjectName("settingsCombo")
+        self._window_mode_combo.addItem("Windowed", "windowed")
+        self._window_mode_combo.addItem("Fullscreen", "fullscreen")
+        saved_mode = self._settings.get("window_mode", "windowed")
+        self._window_mode_combo.setCurrentIndex(1 if saved_mode == "fullscreen" else 0)
+        self._window_mode_combo.currentIndexChanged.connect(self._on_window_mode_changed)
+        disp_form.addRow(_settings_lbl("Window Mode"), self._window_mode_combo)
+
+        # Resolution (disabled in fullscreen)
+        self._resolution_combo = QComboBox()
+        self._resolution_combo.setObjectName("settingsCombo")
+        for lbl_text, w, h in _RESOLUTIONS:
+            self._resolution_combo.addItem(lbl_text, (w, h))
+        saved_res = list(self._settings.get("resolution", [1280, 720]))
+        for i, (_, w, h) in enumerate(_RESOLUTIONS):
+            if saved_res == [w, h]:
+                self._resolution_combo.setCurrentIndex(i)
+                break
+        self._resolution_combo.setEnabled(saved_mode != "fullscreen")
+        disp_form.addRow(_settings_lbl("Resolution"), self._resolution_combo)
+
+        vlay.addWidget(disp_grp)
+        vlay.addStretch()
+
+        # Apply button
+        apply_btn = QPushButton("APPLY")
+        apply_btn.setObjectName("settingsApplyBtn")
+        apply_btn.setToolTip("Apply and save settings")
+        apply_btn.clicked.connect(self._apply_settings)
+        vlay.addWidget(apply_btn, 0, Qt.AlignCenter)
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
         return page
 
     # ── Navigation ─────────────────────────────────────────────────────────
@@ -640,6 +905,10 @@ class MediaPlayer(QMainWindow):
         self._home_btn.show()
 
     def _go_to_settings(self) -> None:
+        # Sync live state into the settings widgets before showing the page
+        self._settings_vol_slider.setValue(self.player.volume())
+        self._window_mode_combo.setCurrentIndex(1 if self._is_fullscreen else 0)
+        self._resolution_combo.setEnabled(not self._is_fullscreen)
         self._stack.setCurrentIndex(2)
         self._home_btn.show()
 
@@ -1054,6 +1323,92 @@ class MediaPlayer(QMainWindow):
         except (OSError, json.JSONDecodeError):
             pass
 
+    # ── Settings persistence ───────────────────────────────────────────────
+
+    def _load_settings(self) -> dict:
+        """Load settings from disk, filling in defaults for missing keys."""
+        defaults = dict(_DEFAULT_SETTINGS)
+        if not os.path.isfile(_SETTINGS_FILE):
+            return defaults
+        try:
+            with open(_SETTINGS_FILE, encoding="utf-8") as fh:
+                data = json.load(fh)
+            for key, default_val in defaults.items():
+                if key not in data:
+                    data[key] = default_val
+            return data
+        except (OSError, json.JSONDecodeError):
+            return defaults
+
+    def _save_settings(self) -> None:
+        """Persist current settings to disk."""
+        try:
+            with open(_SETTINGS_FILE, "w", encoding="utf-8") as fh:
+                json.dump(self._settings, fh, indent=2)
+        except OSError:
+            pass
+
+    def _apply_initial_settings(self) -> None:
+        """Apply saved settings on startup (volume and window size only;
+        display placement and fullscreen are deferred to showEvent)."""
+        vol = self._settings.get("volume", 80)
+        self.player.setVolume(vol)
+        self._vol_slider.setValue(vol)
+
+        # Apply window size only in windowed mode
+        if self._settings.get("window_mode", "windowed") != "fullscreen":
+            res = self._settings.get("resolution", [1280, 720])
+            if isinstance(res, (list, tuple)) and len(res) == 2:
+                self.resize(int(res[0]), int(res[1]))
+
+    def _apply_settings(self) -> None:
+        """Read settings widgets, apply all changes, and persist to disk."""
+        # Volume
+        vol = self._settings_vol_slider.value()
+        self._settings["volume"] = vol
+        self.player.setVolume(vol)
+        self._vol_slider.setValue(vol)
+
+        # Audio device (stored for backends that support device selection)
+        self._settings["audio_device"] = self._audio_device_combo.currentData() or ""
+
+        # Monitor – move window to selected screen
+        display_idx = self._display_combo.currentData()
+        if not isinstance(display_idx, int):
+            display_idx = 0
+        self._settings["display_index"] = display_idx
+        screens = QApplication.screens()
+        if 0 <= display_idx < len(screens):
+            scr = screens[display_idx]
+            geo = scr.availableGeometry()
+            self.move(
+                geo.x() + max(0, (geo.width() - self.width()) // 2),
+                geo.y() + max(0, (geo.height() - self.height()) // 2),
+            )
+
+        # Window mode
+        mode = self._window_mode_combo.currentData()
+        self._settings["window_mode"] = mode
+        if mode == "fullscreen" and not self._is_fullscreen:
+            self._toggle_fullscreen()
+        elif mode == "windowed" and self._is_fullscreen:
+            self._exit_fullscreen()
+
+        # Resolution (only meaningful in windowed mode)
+        if mode == "windowed":
+            res = self._resolution_combo.currentData()
+            if res:
+                self._settings["resolution"] = list(res)
+                self.resize(res[0], res[1])
+
+        self._save_settings()
+
+    def _on_window_mode_changed(self, _index: int) -> None:
+        """Enable or disable the resolution selector based on the chosen mode."""
+        self._resolution_combo.setEnabled(
+            self._window_mode_combo.currentData() == "windowed"
+        )
+
     # ── Fullscreen ─────────────────────────────────────────────────────────
 
     def _toggle_fullscreen(self) -> None:
@@ -1082,6 +1437,33 @@ class MediaPlayer(QMainWindow):
             self.unsetCursor()
             self._cursor_timer.start(3000)
         super().mouseMoveEvent(event)
+
+    def showEvent(self, event) -> None:
+        """On first show: move to saved display and apply fullscreen if needed."""
+        super().showEvent(event)
+        if not getattr(self, "_initial_layout_applied", False):
+            self._initial_layout_applied = True
+            display_idx = self._settings.get("display_index", 0)
+            screens = QApplication.screens()
+            if isinstance(display_idx, int) and 0 <= display_idx < len(screens):
+                scr = screens[display_idx]
+                geo = scr.availableGeometry()
+                self.move(
+                    geo.x() + max(0, (geo.width() - self.width()) // 2),
+                    geo.y() + max(0, (geo.height() - self.height()) // 2),
+                )
+            if self._settings.get("window_mode") == "fullscreen":
+                QTimer.singleShot(0, self._toggle_fullscreen)
+
+    def closeEvent(self, event) -> None:
+        """Auto-save current volume and window state on exit."""
+        self._settings["volume"] = self.player.volume()
+        self._settings["window_mode"] = "fullscreen" if self._is_fullscreen else "windowed"
+        if not self._is_fullscreen:
+            sz = self.size()
+            self._settings["resolution"] = [sz.width(), sz.height()]
+        self._save_settings()
+        super().closeEvent(event)
 
     # ── Player signals ─────────────────────────────────────────────────────
 
