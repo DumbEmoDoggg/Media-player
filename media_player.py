@@ -9,21 +9,24 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 
-from PyQt5.QtCore import Qt, QUrl, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QKeySequence
+from PyQt5.QtCore import Qt, QUrl, QTimer, QThread, pyqtSignal
+from PyQt5.QtGui import QFont, QKeySequence, QPixmap
 from PyQt5.QtMultimedia import QAudio, QAudioDeviceInfo, QMediaContent, QMediaPlayer
 from PyQt5.QtMultimediaWidgets import QVideoWidget
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -56,6 +59,17 @@ VIDEO_FILTER = (
     "Video Files (*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.webm "
     "*.m4v *.mpg *.mpeg *.3gp *.ts *.m2ts *.vob *.ogv *.mxf "
     "*.asf *.rm *.rmvb);;All Files (*)"
+)
+
+# ---------------------------------------------------------------------------
+# Supported image file extensions
+# ---------------------------------------------------------------------------
+SUPPORTED_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"}
+)
+
+IMAGE_FILTER = (
+    "Image Files (*.jpg *.jpeg *.png *.gif *.bmp *.webp *.tiff *.tif);;All Files (*)"
 )
 
 # Path to persist the media library between sessions
@@ -575,6 +589,133 @@ QPushButton#settingsApplyBtn:hover {
 QPushButton#settingsApplyBtn:pressed {
     background-color: #1d6ad0;
 }
+
+/* ── Library sub-tabs ─────────────────────────────────────────────────────── */
+QTabWidget#librarySubTabs::pane {
+    border: none;
+    background-color: #13131b;
+}
+
+QTabWidget#librarySubTabs > QTabBar::tab {
+    background-color: #0f0f18;
+    color: #9898a0;
+    padding: 5px 8px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    border: none;
+    border-bottom: 2px solid transparent;
+}
+
+QTabWidget#librarySubTabs > QTabBar::tab:selected {
+    color: #2d7ae0;
+    border-bottom: 2px solid #2d7ae0;
+    background-color: #13131b;
+}
+
+QTabWidget#librarySubTabs > QTabBar::tab:hover:!selected {
+    color: #dddddd;
+    background-color: #1a1a28;
+}
+
+/* ── Picture viewer ──────────────────────────────────────────────────────── */
+QWidget#pictureViewer {
+    background-color: #000000;
+}
+
+QLabel#pictureLabel {
+    background-color: #000000;
+}
+
+/* ── YouTube search dialog ───────────────────────────────────────────────── */
+QDialog {
+    background-color: #0f0f13;
+    color: #dddddd;
+}
+
+QLineEdit#ytSearchInput {
+    background-color: #1a1a28;
+    color: #dddddd;
+    border: 1px solid #1c1c28;
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-size: 13px;
+}
+
+QLineEdit#ytSearchInput:focus {
+    border-color: #2d7ae0;
+}
+
+QListWidget#ytResultsList {
+    background-color: #13131b;
+    border: 1px solid #1c1c28;
+    border-radius: 4px;
+    color: #c0c0d0;
+    font-size: 12px;
+    outline: 0;
+}
+
+QListWidget#ytResultsList::item {
+    padding: 8px 12px;
+    border-radius: 3px;
+    margin: 2px 4px;
+}
+
+QListWidget#ytResultsList::item:selected {
+    background-color: #2d7ae0;
+    color: #ffffff;
+}
+
+QListWidget#ytResultsList::item:hover:!selected {
+    background-color: #1e1e2e;
+    color: #ffffff;
+}
+
+QLabel#ytStatusLabel {
+    color: #9898a0;
+    font-size: 11px;
+    padding: 4px 0;
+}
+
+QPushButton#ytActionBtn {
+    background-color: #2d7ae0;
+    color: #ffffff;
+    border: none;
+    border-radius: 4px;
+    padding: 8px 16px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+QPushButton#ytActionBtn:hover {
+    background-color: #3d8af0;
+}
+
+QPushButton#ytActionBtn:pressed {
+    background-color: #1d6ad0;
+}
+
+QPushButton#ytActionBtn:disabled {
+    background-color: #1a1a28;
+    color: #505060;
+}
+
+QPushButton#ytCancelBtn {
+    background-color: #1a1a28;
+    color: #9898a0;
+    border: 1px solid #1c1c28;
+    border-radius: 4px;
+    padding: 8px 16px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+QPushButton#ytCancelBtn:hover {
+    background-color: #2a2a3a;
+    color: #dddddd;
+}
 """
 
 
@@ -602,8 +743,277 @@ def _settings_lbl(text: str) -> QLabel:
 
 
 # ---------------------------------------------------------------------------
-# Slider that jumps to the clicked position (instead of stepping)
+# Background worker: yt-dlp search
 # ---------------------------------------------------------------------------
+class _YTSearchWorker(QThread):
+    """Runs yt-dlp search in a background thread."""
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, query: str, max_results: int = 10) -> None:
+        super().__init__()
+        self._query = query
+        self._max_results = max_results
+
+    def run(self) -> None:
+        try:
+            result = subprocess.run(
+                [
+                    "yt-dlp",
+                    f"ytsearch{self._max_results}:{self._query}",
+                    "--dump-json",
+                    "--no-download",
+                    "--no-playlist",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except FileNotFoundError:
+            self.error.emit(
+                "yt-dlp not found. Install it with: pip install yt-dlp"
+            )
+            return
+        except subprocess.TimeoutExpired:
+            self.error.emit("Search timed out")
+            return
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return
+
+        if result.returncode != 0:
+            self.error.emit(result.stderr.strip() or "yt-dlp search failed")
+            return
+
+        entries: list[dict] = []
+        for line in result.stdout.strip().splitlines():
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                duration_val = data.get("duration")
+                entries.append(
+                    {
+                        "title": data.get("title", "Unknown"),
+                        "url": data.get(
+                            "webpage_url", data.get("url", "")
+                        ),
+                        "duration": int(duration_val)
+                        if duration_val is not None
+                        else None,
+                        "channel": data.get(
+                            "uploader", data.get("channel", "")
+                        ),
+                    }
+                )
+            except (json.JSONDecodeError, ValueError):
+                pass
+        self.results_ready.emit(entries)
+
+
+# ---------------------------------------------------------------------------
+# Background worker: yt-dlp stream URL fetcher
+# ---------------------------------------------------------------------------
+class _YTStreamWorker(QThread):
+    """Fetches the best direct stream URL for a YouTube video via yt-dlp."""
+    stream_ready = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, url: str) -> None:
+        super().__init__()
+        self._url = url
+
+    def run(self) -> None:
+        try:
+            result = subprocess.run(
+                [
+                    "yt-dlp",
+                    "--format",
+                    "best[ext=mp4]/best",
+                    "--get-url",
+                    self._url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except FileNotFoundError:
+            self.error.emit(
+                "yt-dlp not found. Install it with: pip install yt-dlp"
+            )
+            return
+        except subprocess.TimeoutExpired:
+            self.error.emit("Timed out while fetching stream URL")
+            return
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return
+
+        if result.returncode == 0:
+            lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
+            if lines:
+                self.stream_ready.emit(lines[0])
+            else:
+                self.error.emit("No stream URL returned by yt-dlp")
+        else:
+            self.error.emit(result.stderr.strip() or "Failed to get stream URL")
+
+
+# ---------------------------------------------------------------------------
+# YouTube search / add dialog
+# ---------------------------------------------------------------------------
+_RESULT_ROLE = Qt.UserRole
+
+
+def _fmt_yt_duration(seconds: int | None) -> str:
+    """Format a duration in seconds to M:SS or H:MM:SS."""
+    if seconds is None:
+        return ""
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+class _YouTubeSearchDialog(QDialog):
+    """Dialog for searching YouTube and selecting videos to add."""
+
+    # Signals emitted when the user confirms a selection:
+    # add_to_library(entries)  – caller should add to YouTube library
+    # add_to_playlist(entries) – caller should add to playlist directly
+    add_to_library = pyqtSignal(list)
+    add_to_playlist = pyqtSignal(list)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("YouTube Search")
+        self.setMinimumSize(660, 480)
+        self._worker: _YTSearchWorker | None = None
+        self._results: list[dict] = []
+        self._build_ui()
+        self.setStyleSheet(parent.styleSheet() if parent else "")
+
+    def _build_ui(self) -> None:
+        v = QVBoxLayout(self)
+        v.setSpacing(10)
+        v.setContentsMargins(16, 16, 16, 16)
+
+        # Search bar
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        self._search_input = QLineEdit()
+        self._search_input.setObjectName("ytSearchInput")
+        self._search_input.setPlaceholderText("Search YouTube…")
+        self._search_input.returnPressed.connect(self._do_search)
+        search_row.addWidget(self._search_input, 1)
+
+        self._search_btn = QPushButton("🔍  SEARCH")
+        self._search_btn.setObjectName("ytActionBtn")
+        self._search_btn.clicked.connect(self._do_search)
+        search_row.addWidget(self._search_btn)
+        v.addLayout(search_row)
+
+        # Status label
+        self._status_lbl = QLabel("Enter a search term and press Search")
+        self._status_lbl.setObjectName("ytStatusLabel")
+        v.addWidget(self._status_lbl)
+
+        # Results list
+        self._results_list = QListWidget()
+        self._results_list.setObjectName("ytResultsList")
+        self._results_list.setSelectionMode(QListWidget.ExtendedSelection)
+        v.addWidget(self._results_list, 1)
+
+        # Bottom buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        self._add_lib_btn = QPushButton("📚  ADD TO LIBRARY")
+        self._add_lib_btn.setObjectName("ytActionBtn")
+        self._add_lib_btn.setToolTip("Save selected videos to the YouTube library")
+        self._add_lib_btn.clicked.connect(self._emit_add_to_library)
+
+        self._add_play_btn = QPushButton("▶  ADD TO PLAYLIST")
+        self._add_play_btn.setObjectName("ytActionBtn")
+        self._add_play_btn.setToolTip("Add selected videos to the current playlist")
+        self._add_play_btn.clicked.connect(self._emit_add_to_playlist)
+
+        close_btn = QPushButton("CLOSE")
+        close_btn.setObjectName("ytCancelBtn")
+        close_btn.clicked.connect(self.accept)
+
+        btn_row.addWidget(self._add_lib_btn)
+        btn_row.addWidget(self._add_play_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        v.addLayout(btn_row)
+
+    def _do_search(self) -> None:
+        query = self._search_input.text().strip()
+        if not query:
+            return
+        self._search_btn.setEnabled(False)
+        self._add_lib_btn.setEnabled(False)
+        self._add_play_btn.setEnabled(False)
+        self._status_lbl.setText("Searching…")
+        self._results_list.clear()
+        self._results = []
+
+        self._worker = _YTSearchWorker(query)
+        self._worker.results_ready.connect(self._on_results)
+        self._worker.error.connect(self._on_error)
+        self._worker.start()
+
+    def _on_results(self, entries: list[dict]) -> None:
+        self._results = entries
+        self._results_list.clear()
+        for entry in entries:
+            dur = _fmt_yt_duration(entry.get("duration"))
+            dur_str = f"  [{dur}]" if dur else ""
+            channel = entry.get("channel", "")
+            line1 = f"{entry['title']}{dur_str}"
+            line2 = f"  {channel}" if channel else ""
+            text = line1 + ("\n" + line2 if line2 else "")
+            item = QListWidgetItem(text)
+            item.setData(_RESULT_ROLE, entry)
+            self._results_list.addItem(item)
+        self._status_lbl.setText(
+            f"Found {len(entries)} result(s). Select one or more, then choose an action."
+        )
+        self._search_btn.setEnabled(True)
+        self._add_lib_btn.setEnabled(True)
+        self._add_play_btn.setEnabled(True)
+
+    def _on_error(self, msg: str) -> None:
+        self._status_lbl.setText(f"Error: {msg}")
+        self._search_btn.setEnabled(True)
+        self._add_lib_btn.setEnabled(True)
+        self._add_play_btn.setEnabled(True)
+
+    def _selected_entries(self) -> list[dict]:
+        return [
+            item.data(_RESULT_ROLE)
+            for item in self._results_list.selectedItems()
+            if item.data(_RESULT_ROLE)
+        ]
+
+    def _emit_add_to_library(self) -> None:
+        entries = self._selected_entries()
+        if not entries:
+            QMessageBox.information(self, "No Selection", "Please select one or more videos first.")
+            return
+        self.add_to_library.emit(entries)
+
+    def _emit_add_to_playlist(self) -> None:
+        entries = self._selected_entries()
+        if not entries:
+            QMessageBox.information(self, "No Selection", "Please select one or more videos first.")
+            return
+        self.add_to_playlist.emit(entries)
+
+
+
 class _ClickableSlider(QSlider):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -641,13 +1051,19 @@ class MediaPlayer(QMainWindow):
 
         # Internal state
         self._playlist_paths: list[str] = []
+        self._playlist_types: list[str] = []   # "video" | "image" | "youtube"
         self._current_index: int = -1
         self._seek_dragging: bool = False
         self._is_fullscreen: bool = False
 
-        # Media library: list of scanned folder paths and discovered video files
+        # Media library
         self._library_folders: list[str] = []
-        self._library_paths: list[str] = []
+        self._library_paths: list[str] = []          # video files
+        self._picture_library_paths: list[str] = []  # image files
+        self._youtube_library: list[dict] = []        # YouTube entries
+
+        # Active yt-dlp stream worker (kept alive until thread finishes)
+        self._yt_stream_worker: _YTStreamWorker | None = None
 
         # Auto-hide cursor in fullscreen
         self._cursor_timer = QTimer(self)
@@ -993,6 +1409,21 @@ class MediaPlayer(QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
+        self._library_subtabs = QTabWidget()
+        self._library_subtabs.setObjectName("librarySubTabs")
+        self._library_subtabs.addTab(self._make_video_library_subtab(), "VIDEOS")
+        self._library_subtabs.addTab(self._make_picture_library_subtab(), "PICTURES")
+        self._library_subtabs.addTab(self._make_youtube_library_subtab(), "YOUTUBE")
+        v.addWidget(self._library_subtabs, 1)
+
+        return widget
+
+    def _make_video_library_subtab(self) -> QWidget:
+        widget = QWidget()
+        v = QVBoxLayout(widget)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
         self._library_widget = QListWidget()
         self._library_widget.setObjectName("library")
         self._library_widget.itemDoubleClicked.connect(
@@ -1009,19 +1440,111 @@ class MediaPlayer(QMainWindow):
         scan_btn.setToolTip("Scan a folder for video files")
         scan_btn.clicked.connect(self._scan_folder)
 
-        add_all_btn = QPushButton("▶  ADD ALL")
+        add_all_btn = QPushButton("▶  ALL")
         add_all_btn.setObjectName("sidebarBtn")
-        add_all_btn.setToolTip("Add all library items to playlist")
+        add_all_btn.setToolTip("Add all video library items to playlist")
         add_all_btn.clicked.connect(self._library_add_all)
 
         clear_lib_btn = QPushButton("✕")
         clear_lib_btn.setObjectName("sidebarBtn")
-        clear_lib_btn.setToolTip("Clear library")
+        clear_lib_btn.setToolTip("Clear video library")
         clear_lib_btn.clicked.connect(self._clear_library)
 
         btn_row.addWidget(scan_btn)
         btn_row.addWidget(add_all_btn)
         btn_row.addWidget(clear_lib_btn)
+        v.addLayout(btn_row)
+
+        return widget
+
+    def _make_picture_library_subtab(self) -> QWidget:
+        widget = QWidget()
+        v = QVBoxLayout(widget)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        self._picture_library_widget = QListWidget()
+        self._picture_library_widget.setObjectName("library")
+        self._picture_library_widget.itemDoubleClicked.connect(
+            self._on_picture_library_double_click
+        )
+        v.addWidget(self._picture_library_widget, 1)
+
+        # Row 1: Scan folder + Add files
+        btn_row1 = QHBoxLayout()
+        btn_row1.setContentsMargins(8, 8, 8, 2)
+        btn_row1.setSpacing(6)
+
+        scan_btn = QPushButton("📁  SCAN")
+        scan_btn.setObjectName("sidebarBtn")
+        scan_btn.setToolTip("Scan a folder for image files")
+        scan_btn.clicked.connect(self._scan_folder)
+
+        add_pics_btn = QPushButton("🖼  ADD FILES")
+        add_pics_btn.setObjectName("sidebarBtn")
+        add_pics_btn.setToolTip("Add image files from a file dialog")
+        add_pics_btn.clicked.connect(self._add_pictures)
+
+        btn_row1.addWidget(scan_btn)
+        btn_row1.addWidget(add_pics_btn)
+        v.addLayout(btn_row1)
+
+        # Row 2: Add all + Clear
+        btn_row2 = QHBoxLayout()
+        btn_row2.setContentsMargins(8, 2, 8, 8)
+        btn_row2.setSpacing(6)
+
+        add_all_btn = QPushButton("▶  ADD ALL")
+        add_all_btn.setObjectName("sidebarBtn")
+        add_all_btn.setToolTip("Add all pictures to playlist")
+        add_all_btn.clicked.connect(self._picture_library_add_all)
+
+        clear_btn = QPushButton("✕  CLEAR")
+        clear_btn.setObjectName("sidebarBtn")
+        clear_btn.setToolTip("Clear picture library")
+        clear_btn.clicked.connect(self._clear_picture_library)
+
+        btn_row2.addWidget(add_all_btn)
+        btn_row2.addWidget(clear_btn)
+        v.addLayout(btn_row2)
+
+        return widget
+
+    def _make_youtube_library_subtab(self) -> QWidget:
+        widget = QWidget()
+        v = QVBoxLayout(widget)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        self._youtube_library_widget = QListWidget()
+        self._youtube_library_widget.setObjectName("library")
+        self._youtube_library_widget.itemDoubleClicked.connect(
+            self._on_youtube_library_double_click
+        )
+        v.addWidget(self._youtube_library_widget, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(8, 8, 8, 8)
+        btn_row.setSpacing(6)
+
+        search_btn = QPushButton("🔍  SEARCH")
+        search_btn.setObjectName("sidebarBtn")
+        search_btn.setToolTip("Search YouTube and add videos")
+        search_btn.clicked.connect(self._youtube_search)
+
+        add_all_btn = QPushButton("▶  ALL")
+        add_all_btn.setObjectName("sidebarBtn")
+        add_all_btn.setToolTip("Add all YouTube library items to playlist")
+        add_all_btn.clicked.connect(self._youtube_library_add_all)
+
+        clear_btn = QPushButton("✕")
+        clear_btn.setObjectName("sidebarBtn")
+        clear_btn.setToolTip("Clear YouTube library")
+        clear_btn.clicked.connect(self._clear_youtube_library)
+
+        btn_row.addWidget(search_btn)
+        btn_row.addWidget(add_all_btn)
+        btn_row.addWidget(clear_btn)
         v.addLayout(btn_row)
 
         return widget
@@ -1033,13 +1556,29 @@ class MediaPlayer(QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
+        # Stack: index 0 = video, index 1 = picture viewer
+        self._media_stack = QStackedWidget()
+
         self._video_widget = _VideoWidget()
         self._video_widget.double_clicked.connect(self._toggle_fullscreen)
         self._video_widget.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding
         )
-        v.addWidget(self._video_widget, 1)
+        self._media_stack.addWidget(self._video_widget)  # index 0
 
+        # Picture viewer page
+        self._picture_scroll = QScrollArea()
+        self._picture_scroll.setObjectName("pictureViewer")
+        self._picture_scroll.setAlignment(Qt.AlignCenter)
+        self._picture_scroll.setWidgetResizable(False)
+        self._picture_scroll.setFrameShape(QFrame.NoFrame)
+        self._picture_label = QLabel()
+        self._picture_label.setObjectName("pictureLabel")
+        self._picture_label.setAlignment(Qt.AlignCenter)
+        self._picture_scroll.setWidget(self._picture_label)
+        self._media_stack.addWidget(self._picture_scroll)  # index 1
+
+        v.addWidget(self._media_stack, 1)
         return container
 
     def _make_control_bar(self) -> QFrame:
@@ -1159,12 +1698,21 @@ class MediaPlayer(QMainWindow):
             return
         self._current_index = index
         path = self._playlist_paths[index]
-        self.player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
-        self.player.play()
+        media_type = self._playlist_types[index] if index < len(self._playlist_types) else "video"
         self._playlist_widget.setCurrentRow(index)
-        name = os.path.basename(path)
-        self._now_playing_lbl.setText(name)
-        self.setWindowTitle(f"{name} — Lumina Media Player")
+
+        if media_type == "image":
+            self._show_picture(path)
+        elif media_type == "youtube":
+            self._play_youtube(path, index)
+        else:
+            # Local video
+            self._media_stack.setCurrentIndex(0)
+            self.player.setMedia(QMediaContent(QUrl.fromLocalFile(path)))
+            self.player.play()
+            name = os.path.basename(path)
+            self._now_playing_lbl.setText(name)
+            self.setWindowTitle(f"{name} — Lumina Media Player")
 
     def _prev_track(self) -> None:
         if self._current_index > 0:
@@ -1194,26 +1742,39 @@ class MediaPlayer(QMainWindow):
     # ── File / playlist operations ─────────────────────────────────────────
 
     def _open_files(self) -> None:
+        combined_filter = (
+            "Media Files (*.mp4 *.avi *.mkv *.mov *.wmv *.flv *.webm "
+            "*.m4v *.mpg *.mpeg *.3gp *.ts *.m2ts *.vob *.ogv *.mxf "
+            "*.asf *.rm *.rmvb "
+            "*.jpg *.jpeg *.png *.gif *.bmp *.webp *.tiff *.tif);;"
+            + VIDEO_FILTER + ";;" + IMAGE_FILTER
+        )
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Open Video Files", "", VIDEO_FILTER
+            self, "Open Media Files", "", combined_filter
         )
         if paths:
             start = len(self._playlist_paths)
             for p in paths:
-                self._add_to_playlist(p)
+                ext = os.path.splitext(p)[1].lower()
+                if ext in SUPPORTED_IMAGE_EXTENSIONS:
+                    self._add_to_playlist(p, "image")
+                else:
+                    self._add_to_playlist(p, "video")
             self._play_index(start)
 
-    def _add_to_playlist(self, path: str) -> None:
-        name = os.path.basename(path)
-        item = QListWidgetItem(name)
+    def _add_to_playlist(self, path: str, media_type: str = "video", title: str = "") -> None:
+        display = title or os.path.basename(path)
+        item = QListWidgetItem(display)
         item.setToolTip(path)
         self._playlist_widget.addItem(item)
         self._playlist_paths.append(path)
+        self._playlist_types.append(media_type)
 
     def _clear_playlist(self) -> None:
         self.player.stop()
         self._playlist_widget.clear()
         self._playlist_paths.clear()
+        self._playlist_types.clear()
         self._current_index = -1
         self._now_playing_lbl.setText("No media loaded")
         self.setWindowTitle("Lumina Media Player")
@@ -1226,62 +1787,144 @@ class MediaPlayer(QMainWindow):
     # ── Media library operations ───────────────────────────────────────────
 
     def _scan_folder(self) -> None:
-        """Open a directory dialog and recursively scan for video files."""
+        """Open a directory dialog and recursively scan for video and image files."""
         folder = QFileDialog.getExistingDirectory(
             self, "Select Folder to Scan", os.path.expanduser("~")
         )
         if not folder:
             return
 
-        found: list[str] = []
+        found_videos: list[str] = []
+        found_images: list[str] = []
         for dirpath, _dirnames, filenames in os.walk(folder):
             for fname in sorted(filenames):
-                if os.path.splitext(fname)[1].lower() in SUPPORTED_EXTENSIONS:
-                    found.append(os.path.join(dirpath, fname))
+                ext = os.path.splitext(fname)[1].lower()
+                full_path = os.path.join(dirpath, fname)
+                if ext in SUPPORTED_EXTENSIONS:
+                    found_videos.append(full_path)
+                elif ext in SUPPORTED_IMAGE_EXTENSIONS:
+                    found_images.append(full_path)
 
-        if not found:
+        if not found_videos and not found_images:
             QMessageBox.information(
                 self,
-                "No Videos Found",
-                f"No supported video files were found in:\n{folder}",
+                "No Media Found",
+                f"No supported video or image files were found in:\n{folder}",
             )
             return
 
-        # Add folder to tracked folders and merge new paths (avoid duplicates)
+        # Track the scanned folder
         if folder not in self._library_folders:
             self._library_folders.append(folder)
 
-        existing = set(self._library_paths)
-        new_paths = [p for p in found if p not in existing]
-        if new_paths:
-            self._library_paths.extend(new_paths)
+        # Merge videos (avoid duplicates)
+        existing_videos = set(self._library_paths)
+        new_videos = [p for p in found_videos if p not in existing_videos]
+        if new_videos:
+            self._library_paths.extend(new_videos)
             self._library_paths.sort(key=lambda p: os.path.basename(p).lower())
+
+        # Merge images (avoid duplicates)
+        existing_images = set(self._picture_library_paths)
+        new_images = [p for p in found_images if p not in existing_images]
+        if new_images:
+            self._picture_library_paths.extend(new_images)
+            self._picture_library_paths.sort(key=lambda p: os.path.basename(p).lower())
+
+        if new_videos or new_images:
             self._refresh_library_widget()
             self._save_library()
 
     def _refresh_library_widget(self) -> None:
+        self._refresh_video_library_widget()
+        self._refresh_picture_library_widget()
+        self._refresh_youtube_library_widget()
+
+    def _refresh_video_library_widget(self) -> None:
         self._library_widget.clear()
         for path in self._library_paths:
             item = QListWidgetItem(os.path.basename(path))
             item.setToolTip(path)
             self._library_widget.addItem(item)
 
+    def _refresh_picture_library_widget(self) -> None:
+        self._picture_library_widget.clear()
+        for path in self._picture_library_paths:
+            item = QListWidgetItem(os.path.basename(path))
+            item.setToolTip(path)
+            self._picture_library_widget.addItem(item)
+
+    def _refresh_youtube_library_widget(self) -> None:
+        self._youtube_library_widget.clear()
+        for entry in self._youtube_library:
+            dur = _fmt_yt_duration(entry.get("duration"))
+            dur_str = f"  [{dur}]" if dur else ""
+            title = entry.get("title", entry.get("url", "Unknown"))
+            item = QListWidgetItem(f"{title}{dur_str}")
+            item.setToolTip(entry.get("url", ""))
+            item.setData(Qt.UserRole, entry)
+            self._youtube_library_widget.addItem(item)
+
     def _on_library_double_click(self, item: QListWidgetItem) -> None:
-        """Add the double-clicked library item to the playlist and play it."""
+        """Add the double-clicked video library item to the playlist and play it."""
         path = item.toolTip()
         if path not in self._playlist_paths:
-            self._add_to_playlist(path)
+            self._add_to_playlist(path, "video")
         index = self._playlist_paths.index(path)
         self._play_index(index)
 
+    def _on_picture_library_double_click(self, item: QListWidgetItem) -> None:
+        """Add the double-clicked picture to the playlist and display it."""
+        path = item.toolTip()
+        if path not in self._playlist_paths:
+            self._add_to_playlist(path, "image")
+        index = self._playlist_paths.index(path)
+        self._play_index(index)
+
+    def _on_youtube_library_double_click(self, item: QListWidgetItem) -> None:
+        """Add the double-clicked YouTube entry to the playlist and play it."""
+        entry = item.data(Qt.UserRole)
+        if not entry:
+            return
+        url = entry.get("url", "")
+        title = entry.get("title", url)
+        if url not in self._playlist_paths:
+            self._add_to_playlist(url, "youtube", title)
+        index = self._playlist_paths.index(url)
+        self._play_index(index)
+
     def _library_add_all(self) -> None:
-        """Append all library items to the current playlist."""
+        """Append all video library items to the current playlist."""
         if not self._library_paths:
             return
         start = len(self._playlist_paths)
         for path in self._library_paths:
             if path not in self._playlist_paths:
-                self._add_to_playlist(path)
+                self._add_to_playlist(path, "video")
+        if self._current_index < 0 and self._playlist_paths:
+            self._play_index(start)
+
+    def _picture_library_add_all(self) -> None:
+        """Append all picture library items to the current playlist."""
+        if not self._picture_library_paths:
+            return
+        start = len(self._playlist_paths)
+        for path in self._picture_library_paths:
+            if path not in self._playlist_paths:
+                self._add_to_playlist(path, "image")
+        if self._current_index < 0 and self._playlist_paths:
+            self._play_index(start)
+
+    def _youtube_library_add_all(self) -> None:
+        """Append all YouTube library items to the current playlist."""
+        if not self._youtube_library:
+            return
+        start = len(self._playlist_paths)
+        for entry in self._youtube_library:
+            url = entry.get("url", "")
+            title = entry.get("title", url)
+            if url and url not in self._playlist_paths:
+                self._add_to_playlist(url, "youtube", title)
         if self._current_index < 0 and self._playlist_paths:
             self._play_index(start)
 
@@ -1291,11 +1934,23 @@ class MediaPlayer(QMainWindow):
         self._library_widget.clear()
         self._save_library()
 
+    def _clear_picture_library(self) -> None:
+        self._picture_library_paths.clear()
+        self._picture_library_widget.clear()
+        self._save_library()
+
+    def _clear_youtube_library(self) -> None:
+        self._youtube_library.clear()
+        self._youtube_library_widget.clear()
+        self._save_library()
+
     def _save_library(self) -> None:
         """Persist the library to a JSON file."""
         data = {
             "folders": self._library_folders,
             "files": self._library_paths,
+            "pictures": self._picture_library_paths,
+            "youtube": self._youtube_library,
         }
         try:
             with open(LIBRARY_FILE, "w", encoding="utf-8") as fh:
@@ -1313,11 +1968,23 @@ class MediaPlayer(QMainWindow):
             self._library_folders = [
                 f for f in data.get("folders", []) if isinstance(f, str)
             ]
-            # Only keep files that still exist on disk
+            # Only keep video files that still exist on disk
             self._library_paths = [
                 p
                 for p in data.get("files", [])
                 if isinstance(p, str) and os.path.isfile(p)
+            ]
+            # Only keep image files that still exist on disk
+            self._picture_library_paths = [
+                p
+                for p in data.get("pictures", [])
+                if isinstance(p, str) and os.path.isfile(p)
+            ]
+            # Load YouTube entries (URL-based, no disk check)
+            self._youtube_library = [
+                e
+                for e in data.get("youtube", [])
+                if isinstance(e, dict) and e.get("url")
             ]
             self._refresh_library_widget()
         except (OSError, json.JSONDecodeError):
@@ -1516,11 +2183,147 @@ class MediaPlayer(QMainWindow):
         for url in event.mimeData().urls():
             if url.isLocalFile():
                 path = url.toLocalFile()
-                if os.path.splitext(path)[1].lower() in SUPPORTED_EXTENSIONS:
-                    self._add_to_playlist(path)
+                ext = os.path.splitext(path)[1].lower()
+                if ext in SUPPORTED_EXTENSIONS:
+                    self._add_to_playlist(path, "video")
+                    added += 1
+                elif ext in SUPPORTED_IMAGE_EXTENSIONS:
+                    self._add_to_playlist(path, "image")
                     added += 1
         if added:
             self._play_index(start)
+
+    # ── Picture support ────────────────────────────────────────────────────
+
+    def _add_pictures(self) -> None:
+        """Open a file dialog to pick image files and add them to the picture library."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Add Image Files", "", IMAGE_FILTER
+        )
+        if not paths:
+            return
+        existing = set(self._picture_library_paths)
+        new_paths = [p for p in paths if p not in existing]
+        if new_paths:
+            self._picture_library_paths.extend(new_paths)
+            self._picture_library_paths.sort(
+                key=lambda p: os.path.basename(p).lower()
+            )
+            self._refresh_picture_library_widget()
+            self._save_library()
+
+    def _show_picture(self, path: str) -> None:
+        """Display an image file in the picture viewer area."""
+        self.player.stop()
+        self._media_stack.setCurrentIndex(1)
+        name = os.path.basename(path)
+        self._now_playing_lbl.setText(name)
+        self.setWindowTitle(f"{name} — Lumina Media Player")
+        self._seek_slider.setValue(0)
+        self._seek_slider.setRange(0, 0)
+        self._time_lbl.setText("Image")
+
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            self._picture_label.setText(f"Cannot load image:\n{path}")
+            return
+
+        # Scale to fit the available viewport while keeping aspect ratio
+        view_size = self._picture_scroll.viewport().size()
+        scaled = pixmap.scaled(
+            view_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        self._picture_label.setPixmap(scaled)
+        self._picture_label.resize(scaled.size())
+
+    def resizeEvent(self, event) -> None:
+        """Re-scale the current picture when the window is resized."""
+        super().resizeEvent(event)
+        if self._media_stack.currentIndex() == 1:
+            label_pixmap = self._picture_label.pixmap()
+            if label_pixmap and not label_pixmap.isNull():
+                view_size = self._picture_scroll.viewport().size()
+                scaled = label_pixmap.scaled(
+                    view_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                )
+                self._picture_label.setPixmap(scaled)
+                self._picture_label.resize(scaled.size())
+
+    # ── YouTube support ────────────────────────────────────────────────────
+
+    def _youtube_search(self) -> None:
+        """Open the YouTube search dialog."""
+        dlg = _YouTubeSearchDialog(self)
+        dlg.add_to_library.connect(self._on_yt_add_to_library)
+        dlg.add_to_playlist.connect(self._on_yt_add_to_playlist)
+        dlg.exec_()
+
+    def _on_yt_add_to_library(self, entries: list) -> None:
+        """Add YouTube search results to the YouTube library."""
+        existing_urls = {e.get("url") for e in self._youtube_library}
+        added = 0
+        for entry in entries:
+            if entry.get("url") and entry["url"] not in existing_urls:
+                self._youtube_library.append(entry)
+                existing_urls.add(entry["url"])
+                added += 1
+        if added:
+            self._refresh_youtube_library_widget()
+            self._save_library()
+            # Switch to YouTube sub-tab so the user sees the result
+            self._library_subtabs.setCurrentIndex(2)
+
+    def _on_yt_add_to_playlist(self, entries: list) -> None:
+        """Add YouTube search results directly to the playlist."""
+        start = len(self._playlist_paths)
+        for entry in entries:
+            url = entry.get("url", "")
+            title = entry.get("title", url)
+            if url and url not in self._playlist_paths:
+                self._add_to_playlist(url, "youtube", title)
+        if self._current_index < 0 and self._playlist_paths:
+            self._play_index(start)
+        # Navigate to the player page
+        self._go_to_player()
+
+    def _play_youtube(self, url: str, index: int) -> None:
+        """Start a yt-dlp worker to resolve the stream URL, then play it."""
+        self._media_stack.setCurrentIndex(0)
+        self.player.stop()
+
+        # Display a placeholder title while resolving
+        title = ""
+        if index < len(self._playlist_types):
+            item = self._playlist_widget.item(index)
+            if item:
+                title = item.text()
+        display = title or url
+        self._now_playing_lbl.setText(f"⏳ Loading: {display}")
+        self.setWindowTitle(f"Loading… — Lumina Media Player")
+
+        # Cancel any previous worker
+        if self._yt_stream_worker is not None:
+            self._yt_stream_worker.results_ready if hasattr(self._yt_stream_worker, "results_ready") else None
+            self._yt_stream_worker = None
+
+        self._yt_stream_worker = _YTStreamWorker(url)
+        self._yt_stream_worker.stream_ready.connect(
+            lambda stream_url, t=display: self._on_yt_stream_ready(stream_url, t)
+        )
+        self._yt_stream_worker.error.connect(self._on_yt_stream_error)
+        self._yt_stream_worker.start()
+
+    def _on_yt_stream_ready(self, stream_url: str, title: str) -> None:
+        """Called when yt-dlp has resolved the YouTube stream URL."""
+        self.player.setMedia(QMediaContent(QUrl(stream_url)))
+        self.player.play()
+        self._now_playing_lbl.setText(title)
+        self.setWindowTitle(f"{title} — Lumina Media Player")
+
+    def _on_yt_stream_error(self, msg: str) -> None:
+        """Called when yt-dlp fails to resolve the stream URL."""
+        self._now_playing_lbl.setText(f"YouTube error: {msg}")
+        self.setWindowTitle("Lumina Media Player")
 
 
 # ---------------------------------------------------------------------------
@@ -1547,7 +2350,9 @@ def main() -> None:
             if os.path.isfile(path):
                 ext = os.path.splitext(path)[1].lower()
                 if ext in SUPPORTED_EXTENSIONS:
-                    window._add_to_playlist(path)
+                    window._add_to_playlist(path, "video")
+                elif ext in SUPPORTED_IMAGE_EXTENSIONS:
+                    window._add_to_playlist(path, "image")
         if window._playlist_paths:
             window._play_index(0)
 
